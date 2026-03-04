@@ -1,0 +1,77 @@
+Here's a comprehensive breakdown of what you need to build a planogram compliance app, from inputs through model setup to output.
+
+Required Inputs
+You need two categories of input data:
+1. Reference planogram (the "expected" layout)
+A structured file (CSV, JSON, or XML) that defines—per shelf row—which products (SKUs) should appear, in what order, and optionally how many facings each product should have.arxiv+1
+Example CSV row: shelf_1, row_2, SKU_A, SKU_A, SKU_B, SKU_C, SKU_C, SKU_C
+You also need a product image catalog: at least one clean reference image per SKU for training the classification model.github+1
+2. Realogram images (the "actual" shelf photos)
+Photos of the physical shelf captured via a mobile app, fixed camera, or embedded camera module.form+1
+Can be one image per shelf or multiple overlapping images if the shelf is too wide to capture in a single shot.[pmc.ncbi.nlm.nih]​
+
+Pipeline Architecture (4 stages)
+The standard architecture follows a sequential pipeline where each stage feeds into the next:nextbrain+2
+Stage 1: Shelf/Row Detection
+Goal: Detect individual shelf rows (horizontal bands) in the full shelf image.
+Model: YOLOv8 (or YOLOv5) trained on shelf-row bounding boxes. The 7-Eleven system achieved 99.2% precision and 98.9% recall at this stage.[pmc.ncbi.nlm.nih]​
+Output: Cropped image regions for each shelf row.
+Training data: ~10K–15K annotated shelf images with bounding boxes around each row.
+Stage 2: Product Detection
+Goal: Detect individual product instances within each cropped shelf row.
+Model: YOLOv8 trained on single-class "product" detection (bounding boxes around each item). The SKU-110K dataset is commonly used for pretraining here.ultralytics+1
+Output: Bounding boxes + cropped product images for each detected item, ordered left-to-right.
+Training data: ~50K–100K product-level annotated images. You can bootstrap by pretraining on SKU-110K and fine-tuning on your own shelf images.
+Stage 3: Product Classification/Recognition
+Goal: Identify which SKU each detected product belongs to.
+Model options:
+ResNet101 or EfficientNet-B4 for standard classification across your product catalog.cs229.stanford+1
+FAN-based Transformer if you need strong few-shot/zero-shot capability for new products (achieved 98.4% Top-1 accuracy with only 5 samples per class).[pmc.ncbi.nlm.nih]​
+Output: Predicted SKU label + confidence score for each detected product. Items below a confidence threshold are marked "unknown."
+Training data: ~50–200+ images per SKU category. Use automated clustering (embeddings → HDBSCAN) to speed up labeling.[pmc.ncbi.nlm.nih]​
+Stage 4: Compliance Verification (Alignment)
+Goal: Compare the detected product sequence (realogram) against the reference planogram and generate a compliance report.
+Algorithm: Modified Needleman-Wunsch sequence alignment (originally from bioinformatics). This dynamic-programming approach handles mismatches, missing products, and extra products gracefully.arxiv+1
+Output statuses per product: Correct, Incorrect Position, Wrong Shelf, Out-of-Stock, Extra Product, Unknown.[pmc.ncbi.nlm.nih]​
+Compliance score: A ratio from 0 (no compliance) to 1 (full compliance).[arxiv]​
+
+Practical Setup Steps
+Data preparation
+Collect shelf images from your target stores (varied lighting, angles, shelf types).
+Annotate shelf rows → train shelf detection model.
+Annotate individual products → train product detection model.
+Crop and cluster product images by SKU → train classification model.
+Build your planogram reference files (CSV/JSON per shelf per store).
+Model training stack
+Framework: Ultralytics YOLOv8 for detection; PyTorch + timm for classification.ultralytics+1
+Annotation tools: Roboflow, CVAT, or Label Studio for bounding box annotation.
+Hardware: GPU with ≥16 GB VRAM for training (e.g., NVIDIA L4, T4, or A10). Inference can run on edge devices (Jetson Orin) or cloud.centific+1
+Deployment architecture
+Mobile app (Flutter/React Native) captures shelf images → sends via HTTP to backend.
+Backend (Python/FastAPI) runs the 4-stage pipeline → returns compliance report as JSON.
+Dashboard shows compliance scores, flagged deviations, and historical trends per store.procesoapp+1
+
+Datasets to Bootstrap With
+Dataset
+What it gives you
+Source
+SKU-110K
+11K shelf images, 110K product bounding boxes
+Ultralytics / original paper [docs.ultralytics]​
+Grocery-Planogram-Control
+28 shelf images + 312 annotated objects + reference planogram images
+GitHub (Yücel et al.) [github]​
+Roboflow Planogram Compliance
+Labeled shelf images for compliance (CC BY 4.0)
+Roboflow Universe [universe.roboflow]​
+Supermarket Shelves (Kaggle)
+45 copyright-free shelf images
+Humans in the Loop [kaggle]​
+
+What "good enough" looks like for a POC
+~500 annotated shelf images for row detection
+~5K–10K product-level annotations for product detection (or fine-tune from SKU-110K)
+~50 images per SKU for classification (augment heavily)
+Planogram CSV files for your target shelvesarxiv+1
+The key insight from production systems is that the alignment algorithm (Stage 4) is just as critical as the CV models—even perfect detection is useless without a robust way to compare the detected sequence against the expected planogram.arxiv+1
+

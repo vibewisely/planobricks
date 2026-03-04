@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "resources": [
+    {
+      "type": "schema",
+      "name": "serverless_stable_wunnava_catalog.planobricks_bronze",
+      "id": "serverless_stable_wunnava_catalog.planobricks_bronze",
+      "created_at": "2026-03-03T04:08:43.984227+00:00",
+      "updated_at": "2026-03-03T04:08:43.984227+00:00"
+    },
+    {
+      "type": "schema",
+      "name": "serverless_stable_wunnava_catalog.planobricks_silver",
+      "id": "serverless_stable_wunnava_catalog.planobricks_silver",
+      "created_at": "2026-03-03T04:08:47.560208+00:00",
+      "updated_at": "2026-03-03T04:08:47.560208+00:00"
+    },
+    {
+      "type": "schema",
+      "name": "serverless_stable_wunnava_catalog.planobricks_reference",
+      "id": "serverless_stable_wunnava_catalog.planobricks_reference",
+      "created_at": "2026-03-03T04:08:51.387114+00:00",
+      "updated_at": "2026-03-03T04:08:51.387114+00:00"
+    },
+    {
+      "type": "schema",
+      "name": "serverless_stable_wunnava_catalog.planobricks_gold",
+      "id": "serverless_stable_wunnava_catalog.planobricks_gold",
+      "created_at": "2026-03-03T04:08:54.948260+00:00",
+      "updated_at": "2026-03-03T04:08:54.948260+00:00"
+    },
+    {
+      "type": "schema",
+      "name": "serverless_stable_wunnava_catalog.planobricks_ml",
+      "id": "serverless_stable_wunnava_catalog.planobricks_ml",
+      "created_at": "2026-03-03T04:08:58.181157+00:00",
+      "updated_at": "2026-03-03T04:08:58.181157+00:00"
+    }
+  ]
+}

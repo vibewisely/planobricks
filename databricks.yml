@@ -1,0 +1,20 @@
+bundle:
+  name: planobricks
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    default: "serverless_stable_wunnava_catalog"
+  warehouse_id:
+    default: "d2634d1ef348571a"
+
+targets:
+  dev:
+    default: true
+    mode: development
+    workspace:
+      profile: planobricks-mar2
+    variables:
+      catalog: "serverless_stable_wunnava_catalog"
