@@ -133,6 +133,12 @@ planobricks/
 
 ## Conventions
 
+- **Always use ai-dev-kit MCP tools** for Databricks operations (SQL, volumes, apps, endpoints,
+  UC objects, etc.) instead of CLI commands. The MCP server is configured as
+  `project-0-planobricks-databricks` with 70+ tools including `execute_sql`, `upload_to_volume`,
+  `query_serving_endpoint`, `create_or_update_app`, `manage_uc_objects`, etc.
+- **Use available skills** when relevant — read and follow the SKILL.md file for specialized
+  tasks like app deployment, DABs config, dashboards, SDK usage, etc.
 - All tab content in the initial `app.layout` (no dynamic rendering) to ensure callbacks work
 - `suppress_callback_exceptions=True` for cross-tab component references
 - Use `allow_duplicate=True` on outputs shared across callbacks, always with `prevent_initial_call=True`
