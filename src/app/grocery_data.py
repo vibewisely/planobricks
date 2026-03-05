@@ -362,13 +362,41 @@ def get_compliance_overview(shelves: list[ShelfImage], reference: dict[str, list
     return rows
 
 
-# -- Singleton data cache --
+# -- Singleton data cache (per-store) --
 
 _CACHE: dict = {}
+_STORE_CACHES: dict[str, dict] = {}
+_CURRENT_STORE: str = "store-a"
 
 
-def get_data():
-    """Load and cache all parsed data."""
+def get_current_store() -> str:
+    return _CURRENT_STORE
+
+
+def set_current_store(store_id: str):
+    global _CURRENT_STORE
+    _CURRENT_STORE = store_id
+
+
+def get_data(store_id: str | None = None):
+    """Load and cache all parsed data for a store.
+
+    For 'store-a' (default), uses the bundled Grocery Dataset.
+    For other stores, returns an empty scaffold (users add schematics via editor).
+    """
+    if store_id is None:
+        store_id = _CURRENT_STORE
+
+    if store_id == "store-a":
+        return _get_default_data()
+
+    if store_id not in _STORE_CACHES:
+        _STORE_CACHES[store_id] = _build_empty_store_data(store_id)
+    return _STORE_CACHES[store_id]
+
+
+def _get_default_data():
+    """Load the bundled Grocery Dataset for Store A."""
     if not _CACHE:
         from planogram_engine import build_schematics, compute_compliance as pe_compliance
         import planogram_store as ps
@@ -396,8 +424,47 @@ def get_data():
     return _CACHE
 
 
-def refresh_compliance():
+def _build_empty_store_data(store_id: str):
+    """Build an empty data scaffold for a new store with its schematics."""
+    import planogram_store as ps
+    from planogram_engine import SchematicKey
+
+    store_schematics_raw = ps.load_store_schematics(store_id)
+    schematics: dict[SchematicKey, any] = {}
+    for ks, d in store_schematics_raw.items():
+        sp = ps.dict_to_schematic(d)
+        key = (sp.planogram_id, sp.num_shelves, sp.shelf_rank)
+        schematics[key] = sp
+
+    return {
+        "shelves": [],
+        "shelf_map": {},
+        "reference": {},
+        "schematics": schematics,
+        "compliance_results": {},
+        "planogram_summary": [],
+        "brand_distribution": [],
+        "compliance_overview": [],
+        "store_schematics_raw": store_schematics_raw,
+    }
+
+
+def refresh_compliance(store_id: str | None = None):
     """Recompute compliance after schematic edits. Call after saving schematics."""
+    if store_id is None:
+        store_id = _CURRENT_STORE
+
+    if store_id == "store-a":
+        _refresh_default_compliance()
+    else:
+        if store_id in _STORE_CACHES:
+            del _STORE_CACHES[store_id]
+
+
+def _refresh_default_compliance():
+    if not _CACHE:
+        return
+
     from planogram_engine import compute_compliance as pe_compliance
     import planogram_store as ps
 

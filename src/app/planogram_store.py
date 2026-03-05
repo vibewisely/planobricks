@@ -27,6 +27,8 @@ VOLUME_PATH = (
 
 ALL_SCHEMATICS: dict[str, dict] = {}
 
+STORE_SCHEMATICS_DIR = os.path.join(os.path.dirname(__file__), "data", "store_schematics")
+
 
 def _key_str(key: SchematicKey | str) -> str:
     if isinstance(key, tuple):
@@ -170,3 +172,79 @@ def _save_to_disk() -> None:
         log.info("Schematics saved to UC Volume")
     except Exception as e:
         log.warning("Could not save schematics to UC Volume: %s", e)
+
+
+# ─── Store-scoped helpers ────────────────────────────────────────
+
+def _store_path(store_id: str) -> str:
+    return os.path.join(STORE_SCHEMATICS_DIR, f"{store_id}.json")
+
+
+def _store_volume_path(store_id: str) -> str:
+    return (
+        "/Volumes/serverless_stable_wunnava_catalog"
+        f"/planobricks_reference/inputs/schematics_{store_id}.json"
+    )
+
+
+def load_store_schematics(store_id: str) -> dict[str, dict]:
+    """Load schematics for a specific store."""
+    local = _store_path(store_id)
+    if os.path.isfile(local):
+        try:
+            with open(local) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    try:
+        from databricks.sdk import WorkspaceClient
+        w = WorkspaceClient()
+        resp = w.files.download(_store_volume_path(store_id))
+        data = json.loads(resp.contents.read())
+        os.makedirs(STORE_SCHEMATICS_DIR, exist_ok=True)
+        with open(local, "w") as f:
+            json.dump(data, f)
+        return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_store_schematics(store_id: str, schematics: dict[str, dict]) -> None:
+    """Persist schematics for a specific store."""
+    os.makedirs(STORE_SCHEMATICS_DIR, exist_ok=True)
+    local = _store_path(store_id)
+    with open(local, "w") as f:
+        json.dump(schematics, f, indent=2)
+    try:
+        from databricks.sdk import WorkspaceClient
+        w = WorkspaceClient()
+        content = json.dumps(schematics, indent=2).encode()
+        from io import BytesIO
+        w.files.upload(_store_volume_path(store_id), BytesIO(content), overwrite=True)
+    except Exception as e:
+        log.warning("Could not save store schematics to UC Volume: %s", e)
+
+
+def save_for_store(store_id: str, key_str: str, sp: SchematicPlanogram, origin: str = "custom") -> None:
+    """Save a single schematic for a store."""
+    store_data = load_store_schematics(store_id)
+    store_data[key_str] = schematic_to_dict(sp, origin=origin)
+    save_store_schematics(store_id, store_data)
+
+
+def list_store_keys(store_id: str) -> list[dict]:
+    """List schematic keys for a specific store."""
+    store_data = load_store_schematics(store_id)
+    result = []
+    for ks in sorted(store_data.keys()):
+        d = store_data[ks]
+        total = sum(len(r["brands"]) for r in d["rows"])
+        result.append({
+            "key": ks,
+            "origin": d.get("origin", "auto"),
+            "num_rows": len(d["rows"]),
+            "total_products": total,
+            "source_images": len(d.get("source_images", [])),
+        })
+    return result
