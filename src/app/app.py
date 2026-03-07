@@ -50,11 +50,16 @@ def _get_sdk_client():
 _image_cache: dict[str, str] = {}
 
 
-def _read_volume_image(filename: str) -> str | None:
-    """Read a shelf image from UC Volume via SDK, return base64 string or None."""
+def _read_volume_image(filename: str, volume_path: str | None = None) -> str | None:
+    """Read a shelf image from UC Volume via SDK, return base64 string or None.
+
+    If volume_path is provided, use it directly (for store-scoped images).
+    Otherwise, fall back to the default ShelfImages directory.
+    """
     if filename in _image_cache:
         return _image_cache[filename]
 
+    # Try default local path (Store A bundled images)
     local_path = os.path.join(
         os.environ.get("SHELF_IMAGES_PATH", SHELF_IMAGES_DIR), filename
     )
@@ -65,13 +70,29 @@ def _read_volume_image(filename: str) -> str | None:
         _image_cache[filename] = b64
         return b64
 
+    # Try store-scoped local cache (uploaded images saved locally)
+    store_cache_path = os.path.join(
+        os.path.dirname(__file__), "data", "store_images", "cache"
+    )
+    for dirpath, _dirnames, filenames in os.walk(store_cache_path):
+        if filename in filenames:
+            full = os.path.join(dirpath, filename)
+            print(f"[PlanoBricks] Loading from store cache: {full}", flush=True)
+            with open(full, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode()
+            _image_cache[filename] = b64
+            return b64
+
     w = _get_sdk_client()
     if w is None:
         print(f"[PlanoBricks] No SDK client — cannot load {filename}", flush=True)
         return None
 
-    try:
+    # Use provided volume_path or default to ShelfImages dir
+    if volume_path is None:
         volume_path = f"{SHELF_IMAGES_DIR}/{filename}"
+
+    try:
         print(f"[PlanoBricks] Downloading from volume: {volume_path}", flush=True)
         resp = w.files.download(volume_path)
         raw = resp.contents.read()
@@ -251,6 +272,18 @@ def build_overview_tab(store_id: str = "store-a"):
 # TAB 2 — SHELF INSPECTOR
 # ═══════════════════════════════════════════════════════════════════
 
+def _get_schematic(schema_key: str, store_id: str | None = None):
+    """Look up a schematic by key, respecting the current store."""
+    import planogram_store as ps
+    if store_id is None:
+        store_id = gd.get_current_store()
+    if store_id and store_id != "store-a":
+        store_data = ps.load_store_schematics(store_id)
+        d = store_data.get(schema_key)
+        return ps.dict_to_schematic(d) if d else None
+    return ps.get(schema_key)
+
+
 def _schematic_options(store_id: str | None = None):
     import planogram_store as ps
     opts = []
@@ -373,11 +406,62 @@ def build_shelf_selector(store_id: str = "store-a"):
             ], lg=4),
         ]),
 
+        dbc.Row([
+            dbc.Col(dbc.Card([
+                dbc.CardHeader([
+                    html.I(className="fas fa-pen me-2"),
+                    "Edit Detected Brands",
+                    html.Small(
+                        " — correct misidentified brands, then re-match",
+                        className="text-muted ms-2",
+                    ),
+                ]),
+                dbc.CardBody([
+                    html.Div(id="detected-rows-editor"),
+                    html.Div([
+                        dbc.Button(
+                            [html.I(className="fas fa-sync me-1"), "Re-match"],
+                            id="rematch-btn", color="primary", size="sm",
+                            className="me-2",
+                        ),
+                        dbc.Button(
+                            [html.I(className="fas fa-plus me-1"), "Add Row"],
+                            id="add-detected-row-btn", color="success", size="sm",
+                            outline=True, className="me-2",
+                        ),
+                        dbc.Button(
+                            [html.I(className="fas fa-undo me-1"), "Reset to Original"],
+                            id="reset-detected-btn", color="secondary", size="sm",
+                            outline=True,
+                        ),
+                    ], className="mt-2"),
+                    html.Div(id="rematch-status", className="mt-2"),
+                ]),
+            ], className="shadow-sm border-0"), lg=12),
+        ], className="mt-3"),
+
         dcc.Store(id="current-crop-state", data=None),
     ])
 
 
-def build_shelf_figure(shelf: gd.ShelfImage) -> go.Figure:
+COMPLIANCE_COLORS = {
+    "Correct": "#22c55e",
+    "Wrong Position": "#eab308",
+    "Substitution": "#f97316",
+    "Out-of-Stock": "#ef4444",
+    "Extra": "#3b82f6",
+}
+
+
+def build_shelf_figure(
+    shelf: gd.ShelfImage,
+    compliance_result: pe.ShelfComplianceResult | None = None,
+) -> go.Figure:
+    """Render detected products as bounding boxes.
+
+    If compliance_result is provided, boxes are colored by compliance status
+    (green=correct, yellow=wrong position, red=OOS, etc.) instead of by brand.
+    """
     if not shelf.products:
         return go.Figure()
 
@@ -386,19 +470,46 @@ def build_shelf_figure(shelf: gd.ShelfImage) -> go.Figure:
     max_x = max(all_x) + 50
     max_y = max(all_y) + 50
 
+    # Build a per-product status map from compliance row results
+    # Key by (x, y) coordinates since object ids differ across cluster_into_rows calls
+    product_status: dict[tuple[int, int], str] = {}
+    if compliance_result and compliance_result.row_results:
+        detected_rows = pe.cluster_into_rows(shelf.products)
+        for rr in compliance_result.row_results:
+            if rr.row_index >= len(detected_rows):
+                continue
+            row_products = detected_rows[rr.row_index]
+            det_idx = 0
+            for a in rr.aligned:
+                if a.detected is not None and det_idx < len(row_products):
+                    p = row_products[det_idx]
+                    product_status[(p.x, p.y)] = a.status
+                    det_idx += 1
+
     fig = go.Figure()
 
     for p in shelf.products:
-        color = p.color
+        status = product_status.get((p.x, p.y))
+        if status:
+            color = COMPLIANCE_COLORS.get(status, p.color)
+            label = f"<b>{p.brand}</b><br><i>{status}</i>"
+            opacity = 0.45
+            line_w = 3
+        else:
+            color = p.color
+            label = f"<b>{p.brand}</b>"
+            opacity = 0.3
+            line_w = 2
+
         fig.add_shape(
             type="rect",
             x0=p.x, y0=p.y, x1=p.x + p.w, y1=p.y + p.h,
-            line=dict(color=color, width=2),
-            fillcolor=color, opacity=0.3,
+            line=dict(color=color, width=line_w),
+            fillcolor=color, opacity=opacity,
         )
         fig.add_annotation(
             x=p.center_x, y=p.y - 10,
-            text=f"<b>{p.brand}</b>",
+            text=label,
             showarrow=False,
             font=dict(size=9, color=color),
         )
@@ -532,7 +643,18 @@ def build_alignment_view(result: pe.ShelfComplianceResult) -> list:
 
 def _build_photo_element(filename: str):
     """Build an <img> element for the shelf photo, loading from the UC Volume via SDK."""
-    b64 = _read_volume_image(filename)
+    # For non-Store-A images, look up the store-scoped volume path
+    volume_path = None
+    store_id = gd.get_current_store()
+    if store_id != "store-a":
+        import store_images as si
+
+        manifest = si.load_manifest(store_id)
+        entry = manifest.get(filename)
+        if entry and "volume_path" in entry:
+            volume_path = entry["volume_path"]
+
+    b64 = _read_volume_image(filename, volume_path=volume_path)
     if b64:
         return html.Img(
             src=f"data:image/jpeg;base64,{b64}",
@@ -833,6 +955,8 @@ app.layout = html.Div([
     ], fluid=True, className="px-4 pb-4"),
 
     dcc.Store(id="active-store-id", data="store-a"),
+    dcc.Store(id="schematic-revision", data=0),
+    dcc.Location(id="page-url", refresh=False),
 
     dbc.Modal([
         dbc.ModalHeader("Create New Store"),
@@ -853,6 +977,17 @@ app.layout = html.Div([
 # ═══════════════════════════════════════════════════════════════════
 # CALLBACKS — Store Management
 # ═══════════════════════════════════════════════════════════════════
+
+@callback(
+    Output("store-selector", "options", allow_duplicate=True),
+    Input("page-url", "pathname"),
+    prevent_initial_call="initial_duplicate",
+)
+def refresh_stores_on_load(_pathname):
+    """Reload stores from disk on every page load to pick up externally created stores."""
+    sm.init()
+    return _store_dropdown_options()
+
 
 @callback(
     Output("active-store-id", "data"),
@@ -989,8 +1124,9 @@ def auto_match_schematic(filename, current_schema):
     Output("alignment-details", "children"),
     Input("shelf-selector", "value"),
     Input("schematic-selector", "value"),
+    Input("schematic-revision", "data"),
 )
-def update_shelf_inspector(filename, schema_key):
+def update_shelf_inspector(filename, schema_key, _revision):
     import planogram_store as ps
     empty = go.Figure()
     no_photo = html.P("No image available", className="text-muted text-center mt-5")
@@ -1004,7 +1140,7 @@ def update_shelf_inspector(filename, schema_key):
         return defaults
 
     if schema_key:
-        schematic = ps.get(schema_key)
+        schematic = _get_schematic(schema_key)
         ref_label = f"Reference: {schema_key}"
     else:
         auto_key = (shelf.planogram_id, shelf.num_shelves, shelf.shelf_rank)
@@ -1014,7 +1150,7 @@ def update_shelf_inspector(filename, schema_key):
     cr = _compute_live(shelf, schematic)
 
     photo_el = _build_photo_element(filename)
-    fig = build_shelf_figure(shelf)
+    fig = build_shelf_figure(shelf, compliance_result=cr)
     schematic_fig = build_schematic_figure(schematic) if schematic else go.Figure()
 
     score = cr.score if cr else 0.0
@@ -1085,8 +1221,9 @@ def update_shelf_inspector(filename, schema_key):
     Output("commit-status", "children"),
     Input("shelf-selector", "value"),
     Input("schematic-selector", "value"),
+    Input("schematic-revision", "data"),
 )
-def init_crop_controls(filename, schema_key):
+def init_crop_controls(filename, schema_key, _revision):
     """Initialize the crop slider and preview panel when a shelf/schematic is selected."""
     import planogram_store as ps
     hidden = {"display": "none"}
@@ -1100,7 +1237,7 @@ def init_crop_controls(filename, schema_key):
         return defaults
 
     if schema_key:
-        schematic = ps.get(schema_key)
+        schematic = _get_schematic(schema_key)
     else:
         auto_key = (shelf.planogram_id, shelf.num_shelves, shelf.shelf_rank)
         schematic = data["schematics"].get(auto_key)
@@ -1123,7 +1260,13 @@ def init_crop_controls(filename, schema_key):
 
 
 def _compute_live(shelf, schematic):
-    """Compute compliance for a single image against a specific schematic."""
+    """Compute compliance for a single image against a specific schematic.
+
+    Evaluates ALL detected rows, not just those matching the schematic row count.
+    Extra detected rows beyond the schematic are aligned against an empty reference
+    (all products marked as "Extra"). Schematic rows without detected products are
+    aligned against an empty detection (all products marked as "Out-of-Stock").
+    """
     if not schematic:
         return pe.ShelfComplianceResult(
             filename=shelf.filename, planogram_id=shelf.planogram_id,
@@ -1132,15 +1275,15 @@ def _compute_live(shelf, schematic):
             correct=0, wrong_position=0, substitution=0, out_of_stock=0, extra=0,
         )
     detected_rows = pe.cluster_into_rows(shelf.products)
-    num_rows = len(schematic.rows)
-    if len(detected_rows) < num_rows:
-        detected_rows.extend([] for _ in range(num_rows - len(detected_rows)))
+    num_schematic_rows = len(schematic.rows)
+    num_detected_rows = len(detected_rows)
+    total_rows = max(num_schematic_rows, num_detected_rows)
 
     all_aligned = []
     row_results = []
-    for i in range(num_rows):
-        ref_brands = schematic.rows[i].brands
-        det_brands = pe.row_brand_sequence(detected_rows[i]) if i < len(detected_rows) else []
+    for i in range(total_rows):
+        ref_brands = schematic.rows[i].brands if i < num_schematic_rows else []
+        det_brands = pe.row_brand_sequence(detected_rows[i]) if i < num_detected_rows else []
         aligned = pe.needleman_wunsch(ref_brands, det_brands)
         row_score = pe.alignment_score(aligned)
         all_aligned.extend(aligned)
@@ -1238,7 +1381,7 @@ def update_crop_preview(crop_range, filename, schema_key, crop_state):
         return "", hidden, hidden, hidden, dash.no_update, dash.no_update
 
     if schema_key:
-        schematic = ps.get(schema_key)
+        schematic = _get_schematic(schema_key)
     else:
         auto_key = (shelf.planogram_id, shelf.num_shelves, shelf.shelf_rank)
         schematic = data["schematics"].get(auto_key)
@@ -1292,7 +1435,7 @@ def commit_crop(n_clicks, filename, schema_key, crop_state):
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
 
     if schema_key:
-        schematic = ps.get(schema_key)
+        schematic = _get_schematic(schema_key)
     else:
         auto_key = (shelf.planogram_id, shelf.num_shelves, shelf.shelf_rank)
         schematic = data["schematics"].get(auto_key)
@@ -1327,6 +1470,270 @@ def commit_crop(n_clicks, filename, schema_key, crop_state):
     )
 
     return status_msg, hidden, hidden, hidden, new_state, kpis
+
+
+# ─── Detected Brands Editor Callbacks ────────────────────────────
+
+@callback(
+    Output("detected-rows-editor", "children"),
+    Input("shelf-selector", "value"),
+    Input("schematic-revision", "data"),
+)
+def populate_detected_editor(filename, _revision):
+    """Show editable rows of detected brands for the selected shelf image."""
+    if not filename:
+        return html.P("Select a shelf image above", className="text-muted")
+
+    data = gd.get_data()
+    shelf = data["shelf_map"].get(filename)
+    if not shelf or not shelf.products:
+        return html.P("No products detected", className="text-muted")
+
+    detected_rows = pe.cluster_into_rows(shelf.products)
+    editors = []
+    for i, row in enumerate(detected_rows):
+        brands = pe.row_brand_sequence(row)
+        editors.append(html.Div([
+            html.Label(
+                f"Row {i + 1} ({len(brands)} products)",
+                className="fw-bold small",
+            ),
+            dbc.Input(
+                id={"type": "detected-row-input", "index": i},
+                value=" | ".join(brands),
+                type="text",
+                size="sm",
+                style={"fontFamily": "monospace", "fontSize": "0.8rem"},
+                className="mb-2",
+            ),
+        ]))
+    return html.Div(editors)
+
+
+@callback(
+    Output("detected-rows-editor", "children", allow_duplicate=True),
+    Input("add-detected-row-btn", "n_clicks"),
+    State({"type": "detected-row-input", "index": dash.ALL}, "value"),
+    prevent_initial_call=True,
+)
+def add_detected_row(n_clicks, current_values):
+    """Append a new empty row to the detected brands editor."""
+    if not n_clicks:
+        return dash.no_update
+    editors = []
+    for i, val in enumerate(current_values or []):
+        brands = [b.strip() for b in val.split("|") if b.strip()]
+        editors.append(html.Div([
+            html.Label(
+                f"Row {i + 1} ({len(brands)} products)",
+                className="fw-bold small",
+            ),
+            dbc.Input(
+                id={"type": "detected-row-input", "index": i},
+                value=val,
+                type="text",
+                size="sm",
+                style={"fontFamily": "monospace", "fontSize": "0.8rem"},
+                className="mb-2",
+            ),
+        ]))
+    # Add new empty row
+    new_idx = len(current_values or [])
+    editors.append(html.Div([
+        html.Label(
+            f"Row {new_idx + 1} (new)",
+            className="fw-bold small text-success",
+        ),
+        dbc.Input(
+            id={"type": "detected-row-input", "index": new_idx},
+            value="Unknown | Unknown | Unknown | Unknown | Unknown",
+            type="text",
+            size="sm",
+            style={"fontFamily": "monospace", "fontSize": "0.8rem"},
+            className="mb-2",
+        ),
+    ]))
+    return html.Div(editors)
+
+
+@callback(
+    Output("shelf-image-graph", "figure", allow_duplicate=True),
+    Output("shelf-kpis", "children", allow_duplicate=True),
+    Output("compliance-details", "children", allow_duplicate=True),
+    Output("alignment-details", "children", allow_duplicate=True),
+    Output("rematch-status", "children"),
+    Input("rematch-btn", "n_clicks"),
+    State("shelf-selector", "value"),
+    State("schematic-selector", "value"),
+    State({"type": "detected-row-input", "index": dash.ALL}, "value"),
+    prevent_initial_call=True,
+)
+def rematch_detected(n_clicks, filename, schema_key, row_values):
+    """Re-run compliance with user-edited detected brands."""
+    if not n_clicks or not filename:
+        return (dash.no_update,) * 5
+
+    data = gd.get_data()
+    shelf = data["shelf_map"].get(filename)
+    if not shelf:
+        return (dash.no_update,) * 5
+
+    # Rebuild products with edited brands, keeping original bounding boxes
+    original_rows = pe.cluster_into_rows(shelf.products)
+
+    # Compute layout bounds for synthetic rows
+    if shelf.products:
+        max_y = max(p.y + p.h for p in shelf.products)
+        avg_row_h = max_y // max(len(original_rows), 1)
+        img_w = max(p.x + p.w for p in shelf.products)
+    else:
+        max_y, avg_row_h, img_w = 600, 200, 800
+
+    for i, val in enumerate(row_values):
+        new_brands = [b.strip() for b in val.split("|") if b.strip()]
+        if not new_brands:
+            continue
+
+        if i < len(original_rows):
+            # Edit existing row products
+            row_prods = original_rows[i]
+            for j, prod in enumerate(row_prods):
+                if j < len(new_brands):
+                    prod.brand = new_brands[j]
+            # Add extra products if user added more brands than original
+            for j in range(len(row_prods), len(new_brands)):
+                col_w = img_w // max(len(new_brands), 1)
+                shelf.products.append(gd.Product(
+                    x=j * col_w + 5,
+                    y=row_prods[0].y if row_prods else i * avg_row_h + 10,
+                    w=col_w - 10, h=avg_row_h - 20,
+                    brand=new_brands[j],
+                ))
+        else:
+            # New row — create synthetic products with approximate bounding boxes
+            y_pos = max_y + (i - len(original_rows)) * avg_row_h + 10
+            col_w = img_w // max(len(new_brands), 1)
+            for j, brand in enumerate(new_brands):
+                shelf.products.append(gd.Product(
+                    x=j * col_w + 5, y=y_pos,
+                    w=col_w - 10, h=avg_row_h - 20,
+                    brand=brand,
+                ))
+
+    # Get the schematic for compliance
+    if schema_key:
+        schematic = _get_schematic(schema_key)
+    else:
+        auto_key = (shelf.planogram_id, shelf.num_shelves, shelf.shelf_rank)
+        schematic = data["schematics"].get(auto_key)
+
+    cr = _compute_live(shelf, schematic)
+
+    # Update cached compliance result
+    data["compliance_results"][filename] = cr
+
+    fig = build_shelf_figure(shelf, compliance_result=cr)
+
+    score = cr.score if cr else 0.0
+    kpis = dbc.Row([
+        kpi_card("Score", f"{score * 100:.0f}%", "bullseye",
+                 "success" if score >= 0.5 else ("warning" if score >= 0.3 else "danger")),
+        kpi_card("Products", str(shelf.num_products), "box", "info"),
+        kpi_card("Identified", f"{shelf.identified_pct:.0f}%", "eye", "success"),
+        kpi_card("Out-of-Stock", str(cr.out_of_stock) if cr else "0", "times-circle", "danger"),
+    ])
+
+    compliance_summary = html.Div()
+    if cr:
+        ref_label = f"Reference: {schema_key}" if schema_key else "auto"
+        compliance_summary = html.Div([
+            html.Div([
+                html.Span("Correct: ", className="fw-bold"),
+                dbc.Badge(str(cr.correct), color="success", className="me-2"),
+            ], className="mb-1"),
+            html.Div([
+                html.Span("Wrong Position: ", className="fw-bold"),
+                dbc.Badge(str(cr.wrong_position), color="warning", className="me-2"),
+            ], className="mb-1"),
+            html.Div([
+                html.Span("Substitution: ", className="fw-bold"),
+                dbc.Badge(str(cr.substitution), color="info", className="me-2"),
+            ], className="mb-1"),
+            html.Div([
+                html.Span("Out-of-Stock: ", className="fw-bold"),
+                dbc.Badge(str(cr.out_of_stock), color="danger", className="me-2"),
+            ], className="mb-1"),
+            html.Div([
+                html.Span("Extra: ", className="fw-bold"),
+                dbc.Badge(str(cr.extra), color="primary", className="me-2"),
+            ], className="mb-1"),
+            html.Hr(className="my-2"),
+            html.Small(f"{ref_label} (re-matched)", className="text-muted"),
+        ])
+
+    alignment_view = (
+        build_alignment_view(cr) if cr
+        else [html.P("No alignment data", className="text-muted")]
+    )
+
+    status = dbc.Alert(
+        [html.I(className="fas fa-check-circle me-2"),
+         f"Re-matched: {cr.score * 100:.0f}% compliance"],
+        color="success", duration=4000, className="py-2",
+    )
+
+    return fig, kpis, compliance_summary, alignment_view, status
+
+
+@callback(
+    Output("detected-rows-editor", "children", allow_duplicate=True),
+    Output("rematch-status", "children", allow_duplicate=True),
+    Input("reset-detected-btn", "n_clicks"),
+    State("shelf-selector", "value"),
+    prevent_initial_call=True,
+)
+def reset_detected(n_clicks, filename):
+    """Reset detected brands back to original AI-identified values."""
+    if not n_clicks or not filename:
+        return dash.no_update, dash.no_update
+
+    # Reload original data
+    data = gd.get_data()
+    shelf = data["shelf_map"].get(filename)
+    if not shelf:
+        return dash.no_update, dash.no_update
+
+    # Re-parse from original annotations to restore brands
+    store_id = gd.get_current_store()
+    if store_id != "store-a":
+        import store_images as si
+        manifest = si.load_manifest(store_id)
+        entry = manifest.get(filename)
+        if entry:
+            for prod, orig in zip(shelf.products, entry.get("products", [])):
+                prod.brand = orig.get("brand", prod.brand)
+
+    detected_rows = pe.cluster_into_rows(shelf.products)
+    editors = []
+    for i, row in enumerate(detected_rows):
+        brands = pe.row_brand_sequence(row)
+        editors.append(html.Div([
+            html.Label(
+                f"Row {i + 1} ({len(brands)} products)",
+                className="fw-bold small",
+            ),
+            dbc.Input(
+                id={"type": "detected-row-input", "index": i},
+                value=" | ".join(brands),
+                type="text",
+                size="sm",
+                style={"fontFamily": "monospace", "fontSize": "0.8rem"},
+                className="mb-2",
+            ),
+        ]))
+
+    status = dbc.Alert("Reset to original detected brands", color="info", duration=3000, className="py-2")
+    return html.Div(editors), status
 
 
 @callback(
@@ -1412,17 +1819,19 @@ def load_editor(schema_key, store_id):
     Output("editor-status", "children"),
     Output("editor-schematic-select", "options"),
     Output("schematic-selector", "options"),
+    Output("schematic-revision", "data", allow_duplicate=True),
     Input("editor-save-btn", "n_clicks"),
     State("editor-schematic-select", "value"),
     State({"type": "editor-row-input", "index": dash.ALL}, "value"),
     State("active-store-id", "data"),
+    State("schematic-revision", "data"),
     prevent_initial_call=True,
 )
-def save_editor(n_clicks, schema_key, row_values, store_id):
+def save_editor(n_clicks, schema_key, row_values, store_id, revision):
     import planogram_store as ps
     store_id = store_id or "store-a"
     if not n_clicks or not schema_key:
-        return dash.no_update, dash.no_update, dash.no_update
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
 
     if store_id == "store-a":
         sp = ps.get(schema_key)
@@ -1431,7 +1840,10 @@ def save_editor(n_clicks, schema_key, row_values, store_id):
         sp = ps.dict_to_schematic(store_data[schema_key]) if schema_key in store_data else None
 
     if not sp:
-        return dbc.Alert("Schematic not found", color="danger"), dash.no_update, dash.no_update
+        return (
+            dbc.Alert("Schematic not found", color="danger"),
+            dash.no_update, dash.no_update, dash.no_update,
+        )
 
     new_rows = []
     for i, val in enumerate(row_values):
@@ -1440,15 +1852,15 @@ def save_editor(n_clicks, schema_key, row_values, store_id):
 
     sp.rows = new_rows
     if store_id == "store-a":
-        ps.save(schema_key, sp, origin="custom")
+        ps.save(schema_key, sp, origin="custom", created_by="editor")
     else:
-        ps.save_for_store(store_id, schema_key, sp, origin="custom")
+        ps.save_for_store(store_id, schema_key, sp, origin="custom", created_by="editor")
     gd.refresh_compliance(store_id)
 
     opts = _schematic_options(store_id)
     return (
         dbc.Alert(f"Saved {schema_key} ({sp.total_products} products)", color="success", duration=4000),
-        opts, opts,
+        opts, opts, (revision or 0) + 1,
     )
 
 
@@ -1457,16 +1869,18 @@ def save_editor(n_clicks, schema_key, row_values, store_id):
     Output("editor-schematic-select", "options", allow_duplicate=True),
     Output("editor-schematic-select", "value", allow_duplicate=True),
     Output("schematic-selector", "options", allow_duplicate=True),
+    Output("schematic-revision", "data", allow_duplicate=True),
     Input("editor-reset-btn", "n_clicks"),
     State("editor-schematic-select", "value"),
     State("active-store-id", "data"),
+    State("schematic-revision", "data"),
     prevent_initial_call=True,
 )
-def reset_editor(n_clicks, schema_key, store_id):
+def reset_editor(n_clicks, schema_key, store_id, revision):
     import planogram_store as ps
     store_id = store_id or "store-a"
     if not n_clicks or not schema_key:
-        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
+        return (dash.no_update,) * 5
 
     if store_id == "store-a":
         kt = ps._key_tuple(schema_key)
@@ -1475,13 +1889,13 @@ def reset_editor(n_clicks, schema_key, store_id):
         auto = build_schematics(data["shelves"])
         auto_sp = auto.get(kt)
         if auto_sp:
-            ps.save(schema_key, auto_sp, origin="auto")
+            ps.save(schema_key, auto_sp, origin="auto", created_by="auto_consensus")
             gd.refresh_compliance(store_id)
 
     opts = _schematic_options(store_id)
     return (
         dbc.Alert(f"Reset {schema_key} to auto-generated", color="info", duration=4000),
-        opts, schema_key, opts,
+        opts, schema_key, opts, (revision or 0) + 1,
     )
 
 
@@ -1502,29 +1916,33 @@ def toggle_new_modal(open_click, cancel_click, create_click, is_open):
     Output("editor-schematic-select", "value", allow_duplicate=True),
     Output("schematic-selector", "options", allow_duplicate=True),
     Output("editor-status", "children", allow_duplicate=True),
+    Output("schematic-revision", "data", allow_duplicate=True),
     Input("new-schema-create-btn", "n_clicks"),
     State("new-schema-key", "value"),
     State("new-schema-rows", "value"),
     State("new-schema-cols", "value"),
     State("active-store-id", "data"),
+    State("schematic-revision", "data"),
     prevent_initial_call=True,
 )
-def create_new_schematic(n_clicks, key_str, num_rows, num_cols, store_id):
+def create_new_schematic(n_clicks, key_str, num_rows, num_cols, store_id, revision):
     import planogram_store as ps
     store_id = store_id or "store-a"
     if not n_clicks or not key_str:
-        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
+        return (dash.no_update,) * 5
 
     key_str = key_str.strip()
     if not key_str.startswith("P"):
-        return dash.no_update, dash.no_update, dash.no_update, dbc.Alert(
-            "Key must start with P (e.g. P01/3s/R1)", color="danger", duration=4000)
+        return (dash.no_update,) * 3 + (dbc.Alert(
+            "Key must start with P (e.g. P01/3s/R1)", color="danger", duration=4000),
+            dash.no_update)
 
     try:
         kt = ps._key_tuple(key_str)
     except Exception:
-        return dash.no_update, dash.no_update, dash.no_update, dbc.Alert(
-            "Invalid key format. Use P01/3s/R1", color="danger", duration=4000)
+        return (dash.no_update,) * 3 + (dbc.Alert(
+            "Invalid key format. Use P01/3s/R1", color="danger", duration=4000),
+            dash.no_update)
 
     rows = [pe.SchematicRow(row_index=i, brands=["Unknown"] * int(num_cols))
             for i in range(int(num_rows))]
@@ -1532,12 +1950,12 @@ def create_new_schematic(n_clicks, key_str, num_rows, num_cols, store_id):
         planogram_id=kt[0], num_shelves=kt[1], shelf_rank=kt[2], rows=rows,
     )
     if store_id == "store-a":
-        ps.save(key_str, sp, origin="custom")
+        ps.save(key_str, sp, origin="custom", created_by="editor")
     else:
-        ps.save_for_store(store_id, key_str, sp, origin="custom")
+        ps.save_for_store(store_id, key_str, sp, origin="custom", created_by="editor")
 
     opts = _schematic_options(store_id)
-    return opts, key_str, opts, dbc.Alert(f"Created {key_str}", color="success", duration=4000)
+    return opts, key_str, opts, dbc.Alert(f"Created {key_str}", color="success", duration=4000), (revision or 0) + 1
 
 
 @callback(
@@ -1545,16 +1963,18 @@ def create_new_schematic(n_clicks, key_str, num_rows, num_cols, store_id):
     Output("editor-schematic-select", "value", allow_duplicate=True),
     Output("schematic-selector", "options", allow_duplicate=True),
     Output("editor-status", "children", allow_duplicate=True),
+    Output("schematic-revision", "data", allow_duplicate=True),
     Input("editor-clone-btn", "n_clicks"),
     State("editor-schematic-select", "value"),
     State("active-store-id", "data"),
+    State("schematic-revision", "data"),
     prevent_initial_call=True,
 )
-def clone_schematic(n_clicks, schema_key, store_id):
+def clone_schematic(n_clicks, schema_key, store_id, revision):
     import planogram_store as ps
     store_id = store_id or "store-a"
     if not n_clicks or not schema_key:
-        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
+        return (dash.no_update,) * 5
 
     new_key = schema_key + "-copy"
     if store_id == "store-a":
@@ -1568,7 +1988,11 @@ def clone_schematic(n_clicks, schema_key, store_id):
             ps.save_store_schematics(store_id, store_data)
 
     opts = _schematic_options(store_id)
-    return opts, new_key, opts, dbc.Alert(f"Cloned to {new_key}", color="info", duration=4000)
+    return (
+        opts, new_key, opts,
+        dbc.Alert(f"Cloned to {new_key}", color="info", duration=4000),
+        (revision or 0) + 1,
+    )
 
 
 @callback(
@@ -1576,22 +2000,26 @@ def clone_schematic(n_clicks, schema_key, store_id):
     Output("editor-schematic-select", "value", allow_duplicate=True),
     Output("schematic-selector", "options", allow_duplicate=True),
     Output("editor-status", "children", allow_duplicate=True),
+    Output("schematic-revision", "data", allow_duplicate=True),
     Input("editor-delete-btn", "n_clicks"),
     State("editor-schematic-select", "value"),
     State("active-store-id", "data"),
+    State("schematic-revision", "data"),
     prevent_initial_call=True,
 )
-def delete_schematic(n_clicks, schema_key, store_id):
+def delete_schematic(n_clicks, schema_key, store_id, revision):
     import planogram_store as ps
     store_id = store_id or "store-a"
     if not n_clicks or not schema_key:
-        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
+        return (dash.no_update,) * 5
 
     if store_id == "store-a":
         d = ps.get_all().get(schema_key, {})
         if d.get("origin") == "auto":
-            return dash.no_update, dash.no_update, dash.no_update, dbc.Alert(
-                "Cannot delete auto-generated schematics. Use Reset instead.", color="warning", duration=4000)
+            return (dash.no_update,) * 3 + (dbc.Alert(
+                "Cannot delete auto-generated schematics. Use Reset instead.",
+                color="warning", duration=4000,
+            ), dash.no_update)
         ps.delete(schema_key)
     else:
         store_data = ps.load_store_schematics(store_id)
@@ -1601,7 +2029,11 @@ def delete_schematic(n_clicks, schema_key, store_id):
 
     opts = _schematic_options(store_id)
     new_val = opts[0]["value"] if opts else None
-    return opts, new_val, opts, dbc.Alert(f"Deleted {schema_key}", color="danger", duration=4000)
+    return (
+        opts, new_val, opts,
+        dbc.Alert(f"Deleted {schema_key}", color="danger", duration=4000),
+        (revision or 0) + 1,
+    )
 
 
 # ─── AI Image Upload Callbacks ─────────────────────────────────────
@@ -1636,15 +2068,17 @@ def preview_ai_upload(contents, filename):
     Output("schematic-selector", "options", allow_duplicate=True),
     Output("ai-detect-btn", "disabled", allow_duplicate=True),
     Output("ai-processing-status", "children", allow_duplicate=True),
+    Output("schematic-revision", "data", allow_duplicate=True),
     Input("ai-detect-btn", "n_clicks"),
     State("ai-image-upload", "contents"),
     State("ai-image-upload", "filename"),
     State("ai-schema-key", "value"),
     State("ai-num-rows", "value"),
     State("active-store-id", "data"),
+    State("schematic-revision", "data"),
     prevent_initial_call=True,
 )
-def ai_detect_brands(n_clicks, contents, filename, schema_key, num_rows, store_id):
+def ai_detect_brands(n_clicks, contents, filename, schema_key, num_rows, store_id, revision):
     import planogram_store as ps
     no = dash.no_update
 
@@ -1653,19 +2087,19 @@ def ai_detect_brands(n_clicks, contents, filename, schema_key, num_rows, store_i
 
     if not n_clicks or not contents:
         print("[AI Detect] No clicks or no contents, skipping", flush=True)
-        return no, no, no, no, no, no
+        return no, no, no, no, no, no, no
 
     if not schema_key or not schema_key.strip():
         return (
             dbc.Alert("Please enter a schematic key (e.g. P10/3s/R1)", color="warning"),
-            no, no, no, False, "",
+            no, no, no, False, "", no,
         )
 
     schema_key = schema_key.strip()
     if not schema_key.startswith("P"):
         return (
             dbc.Alert("Key must start with P (e.g. P10/3s/R1)", color="danger"),
-            no, no, no, False, "",
+            no, no, no, False, "", no,
         )
 
     try:
@@ -1673,7 +2107,7 @@ def ai_detect_brands(n_clicks, contents, filename, schema_key, num_rows, store_i
     except Exception:
         return (
             dbc.Alert("Invalid key format. Use P01/3s/R1", color="danger"),
-            no, no, no, False, "",
+            no, no, no, False, "", no,
         )
 
     num_rows = int(num_rows) if num_rows else 3
@@ -1689,13 +2123,16 @@ def ai_detect_brands(n_clicks, contents, filename, schema_key, num_rows, store_i
 
     sp = pe.SchematicPlanogram(
         planogram_id=kt[0], num_shelves=kt[1], shelf_rank=kt[2], rows=rows,
+        source_images=[filename] if filename else [],
     )
 
     store_id = store_id or "store-a"
     if store_id == "store-a":
-        ps.save(schema_key, sp, origin="custom")
+        ps.save(schema_key, sp, origin="custom", created_by="ai_detect")
     else:
-        ps.save_for_store(store_id, schema_key, sp, origin="custom")
+        ps.save_for_store(
+            store_id, schema_key, sp, origin="custom", created_by="ai_detect",
+        )
     gd.refresh_compliance(store_id)
 
     opts = _schematic_options(store_id)
@@ -1731,7 +2168,7 @@ def ai_detect_brands(n_clicks, contents, filename, schema_key, num_rows, store_i
         ], className="border-0 bg-light"),
     ])
 
-    return result_ui, opts, schema_key, opts, False, ""
+    return result_ui, opts, schema_key, opts, False, "", (revision or 0) + 1
 
 
 def _detect_brands_from_image(contents: str, num_rows: int) -> tuple[list[list[str]], str]:

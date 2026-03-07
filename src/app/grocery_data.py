@@ -425,9 +425,11 @@ def _get_default_data():
 
 
 def _build_empty_store_data(store_id: str):
-    """Build an empty data scaffold for a new store with its schematics."""
+    """Build data scaffold for a non-default store, loading registered images."""
+    from planogram_engine import SchematicKey, compute_compliance as pe_compliance
+
     import planogram_store as ps
-    from planogram_engine import SchematicKey
+    import store_images as si
 
     store_schematics_raw = ps.load_store_schematics(store_id)
     schematics: dict[SchematicKey, any] = {}
@@ -436,15 +438,25 @@ def _build_empty_store_data(store_id: str):
         key = (sp.planogram_id, sp.num_shelves, sp.shelf_rank)
         schematics[key] = sp
 
+    # Load registered shelf images (uploaded via email or other sources)
+    shelves = si.manifest_to_shelf_images(store_id)
+
+    # Compute compliance for registered images against store schematics
+    compliance_results = {}
+    for s in shelves:
+        compliance_results[s.filename] = pe_compliance(s, schematics)
+
     return {
-        "shelves": [],
-        "shelf_map": {},
+        "shelves": shelves,
+        "shelf_map": {s.filename: s for s in shelves},
         "reference": {},
         "schematics": schematics,
-        "compliance_results": {},
-        "planogram_summary": [],
-        "brand_distribution": [],
-        "compliance_overview": [],
+        "compliance_results": compliance_results,
+        "planogram_summary": get_planogram_summary(shelves) if shelves else [],
+        "brand_distribution": get_brand_distribution(shelves) if shelves else [],
+        "compliance_overview": (
+            _build_compliance_overview(shelves, compliance_results) if shelves else []
+        ),
         "store_schematics_raw": store_schematics_raw,
     }
 

@@ -29,6 +29,13 @@ ALL_SCHEMATICS: dict[str, dict] = {}
 
 STORE_SCHEMATICS_DIR = os.path.join(os.path.dirname(__file__), "data", "store_schematics")
 
+DELTA_TABLE = "serverless_stable_wunnava_catalog.planobricks_reference.schematics"
+WAREHOUSE_ID = os.environ.get("DATABRICKS_WAREHOUSE_ID", "d2634d1ef348571a")
+STORE_IMAGES_VOLUME = (
+    "/Volumes/serverless_stable_wunnava_catalog"
+    "/planobricks_reference/inputs/images/store_images"
+)
+
 
 def _key_str(key: SchematicKey | str) -> str:
     if isinstance(key, tuple):
@@ -93,9 +100,17 @@ def get_by_tuple(key: SchematicKey) -> SchematicPlanogram | None:
     return get(_key_str(key))
 
 
-def save(key_str: str, sp: SchematicPlanogram, origin: str = "custom") -> None:
-    ALL_SCHEMATICS[key_str] = schematic_to_dict(sp, origin=origin)
+def save(
+    key_str: str,
+    sp: SchematicPlanogram,
+    origin: str = "custom",
+    source_image_path: str = "",
+    created_by: str = "editor",
+) -> None:
+    sp_dict = schematic_to_dict(sp, origin=origin)
+    ALL_SCHEMATICS[key_str] = sp_dict
     _save_to_disk()
+    _save_to_delta("store-a", key_str, sp_dict, source_image_path, created_by)
 
 
 def delete(key_str: str) -> bool:
@@ -174,6 +189,80 @@ def _save_to_disk() -> None:
         log.warning("Could not save schematics to UC Volume: %s", e)
 
 
+def _save_to_delta(
+    store_id: str,
+    key_str: str,
+    sp_dict: dict,
+    source_image_path: str = "",
+    created_by: str = "editor",
+) -> None:
+    """Persist a schematic to the Delta table (best-effort)."""
+    try:
+        from databricks.sdk import WorkspaceClient
+
+        w = WorkspaceClient()
+
+        kt = _key_tuple(key_str)
+        pid, ns, sr = kt
+        rows_json = json.dumps(sp_dict.get("rows", []))
+        num_rows = len(sp_dict.get("rows", []))
+        total_products = sum(len(r.get("brands", [])) for r in sp_dict.get("rows", []))
+        origin = sp_dict.get("origin", "custom")
+        source_filenames = ",".join(sp_dict.get("source_images", []))
+        store_vol = f"{STORE_IMAGES_VOLUME}/{store_id}" if store_id != "store-a" else ""
+
+        # Escape single quotes in JSON for SQL
+        rows_json_escaped = rows_json.replace("'", "''")
+        source_image_path_escaped = source_image_path.replace("'", "''")
+        source_filenames_escaped = source_filenames.replace("'", "''")
+
+        sql = f"""
+        MERGE INTO {DELTA_TABLE} AS t
+        USING (SELECT '{store_id}' AS store_id, '{key_str}' AS schema_key) AS s
+        ON t.store_id = s.store_id AND t.schema_key = s.schema_key
+        WHEN MATCHED THEN UPDATE SET
+          planogram_id = '{pid}',
+          num_shelves = '{ns}',
+          shelf_rank = '{sr}',
+          rows_json = '{rows_json_escaped}',
+          num_rows = {num_rows},
+          total_products = {total_products},
+          origin = '{origin}',
+          source_image_path = '{source_image_path_escaped}',
+          source_image_filenames = '{source_filenames_escaped}',
+          store_volume_location = '{store_vol}',
+          created_by = '{created_by}',
+          updated_at = current_timestamp()
+        WHEN NOT MATCHED THEN INSERT (
+          schema_key, store_id, planogram_id, num_shelves, shelf_rank,
+          rows_json, num_rows, total_products, origin,
+          source_image_path, source_image_filenames, store_volume_location,
+          created_by, created_at, updated_at
+        ) VALUES (
+          '{key_str}', '{store_id}', '{pid}', '{ns}', '{sr}',
+          '{rows_json_escaped}', {num_rows}, {total_products}, '{origin}',
+          '{source_image_path_escaped}', '{source_filenames_escaped}', '{store_vol}',
+          '{created_by}', current_timestamp(), current_timestamp()
+        )
+        """
+
+        resp = w.api_client.do(
+            "POST",
+            "/api/2.0/sql/statements",
+            body={
+                "warehouse_id": WAREHOUSE_ID,
+                "statement": sql,
+                "wait_timeout": "30s",
+            },
+        )
+        status = resp.get("status", {}).get("state", "UNKNOWN") if isinstance(resp, dict) else "OK"
+        print(f"[PlanoBricks] Delta save {key_str} for {store_id}: {status}", flush=True)
+
+    except Exception as e:
+        log.warning("Could not save schematic to Delta: %s", e)
+        print(f"[PlanoBricks] Delta save failed: {e}", flush=True)
+
+
 # ─── Store-scoped helpers ────────────────────────────────────────
 
 def _store_path(store_id: str) -> str:
@@ -187,8 +276,78 @@ def _store_volume_path(store_id: str) -> str:
     )
 
 
+def _load_store_from_delta(store_id: str) -> dict[str, dict]:
+    """Load schematics for a store from the Delta table."""
+    try:
+        from databricks.sdk import WorkspaceClient
+
+        w = WorkspaceClient()
+        sql = (
+            f"SELECT schema_key, planogram_id, num_shelves, shelf_rank, "
+            f"rows_json, origin, source_image_filenames, source_image_path "
+            f"FROM {DELTA_TABLE} WHERE store_id = '{store_id}'"
+        )
+        resp = w.api_client.do(
+            "POST",
+            "/api/2.0/sql/statements",
+            body={
+                "warehouse_id": WAREHOUSE_ID,
+                "statement": sql,
+                "wait_timeout": "30s",
+            },
+        )
+        if not isinstance(resp, dict):
+            return {}
+
+        status = resp.get("status", {}).get("state", "")
+        if status != "SUCCEEDED":
+            print(f"[PlanoBricks] Delta load failed: {status}", flush=True)
+            return {}
+
+        manifest = resp.get("manifest", {})
+        columns = [c["name"] for c in manifest.get("schema", {}).get("columns", [])]
+        data_array = resp.get("result", {}).get("data_array", [])
+        if not data_array or not columns:
+            return {}
+
+        result: dict[str, dict] = {}
+        for row in data_array:
+            row_dict = dict(zip(columns, row))
+            key = row_dict["schema_key"]
+            rows = json.loads(row_dict.get("rows_json") or "[]")
+            source_imgs = [
+                s.strip()
+                for s in (row_dict.get("source_image_filenames") or "").split(",")
+                if s.strip()
+            ]
+            result[key] = {
+                "planogram_id": row_dict["planogram_id"],
+                "num_shelves": row_dict["num_shelves"],
+                "shelf_rank": row_dict["shelf_rank"],
+                "rows": rows,
+                "source_images": source_imgs,
+                "origin": row_dict.get("origin", "custom"),
+                "updated_at": time.time(),
+            }
+
+        if result:
+            print(
+                f"[PlanoBricks] Loaded {len(result)} schematics for {store_id} from Delta",
+                flush=True,
+            )
+        return result
+
+    except Exception as e:
+        print(f"[PlanoBricks] Delta load failed for {store_id}: {e}", flush=True)
+        return {}
+
+
 def load_store_schematics(store_id: str) -> dict[str, dict]:
-    """Load schematics for a specific store."""
+    """Load schematics for a specific store.
+
+    Tries: local file → UC Volume → Delta table.
+    Caches locally on successful remote load.
+    """
     local = _store_path(store_id)
     if os.path.isfile(local):
         try:
@@ -196,17 +355,42 @@ def load_store_schematics(store_id: str) -> dict[str, dict]:
                 return json.load(f)
         except Exception:
             pass
+
+    # Try UC Volume
     try:
         from databricks.sdk import WorkspaceClient
+
         w = WorkspaceClient()
         resp = w.files.download(_store_volume_path(store_id))
         data = json.loads(resp.contents.read())
         os.makedirs(STORE_SCHEMATICS_DIR, exist_ok=True)
         with open(local, "w") as f:
             json.dump(data, f)
+        print(f"[PlanoBricks] Loaded schematics for {store_id} from UC Volume", flush=True)
         return data
     except Exception:
         pass
+
+    # Try Delta table as final fallback
+    data = _load_store_from_delta(store_id)
+    if data:
+        # Cache locally for fast subsequent loads
+        os.makedirs(STORE_SCHEMATICS_DIR, exist_ok=True)
+        with open(local, "w") as f:
+            json.dump(data, f, indent=2)
+        # Also sync to UC Volume for next time
+        try:
+            from io import BytesIO
+
+            from databricks.sdk import WorkspaceClient
+
+            w = WorkspaceClient()
+            content = json.dumps(data, indent=2).encode()
+            w.files.upload(_store_volume_path(store_id), BytesIO(content), overwrite=True)
+        except Exception:
+            pass
+        return data
+
     return {}
 
 
@@ -226,11 +410,20 @@ def save_store_schematics(store_id: str, schematics: dict[str, dict]) -> None:
         log.warning("Could not save store schematics to UC Volume: %s", e)
 
 
-def save_for_store(store_id: str, key_str: str, sp: SchematicPlanogram, origin: str = "custom") -> None:
+def save_for_store(
+    store_id: str,
+    key_str: str,
+    sp: SchematicPlanogram,
+    origin: str = "custom",
+    source_image_path: str = "",
+    created_by: str = "editor",
+) -> None:
     """Save a single schematic for a store."""
+    sp_dict = schematic_to_dict(sp, origin=origin)
     store_data = load_store_schematics(store_id)
-    store_data[key_str] = schematic_to_dict(sp, origin=origin)
+    store_data[key_str] = sp_dict
     save_store_schematics(store_id, store_data)
+    _save_to_delta(store_id, key_str, sp_dict, source_image_path, created_by)
 
 
 def list_store_keys(store_id: str) -> list[dict]:

@@ -1,0 +1,227 @@
+{
+  "1772731015_IMG_0493.jpeg": {
+    "filename": "1772731015_IMG_0493.jpeg",
+    "camera_id": "email",
+    "planogram_id": "10",
+    "num_shelves": "3",
+    "shelf_rank": "1",
+    "copy": "1",
+    "products": [
+      {
+        "x": 5,
+        "y": 10,
+        "w": 70,
+        "h": 180,
+        "brand": "Miss Vickies"
+      },
+      {
+        "x": 85,
+        "y": 10,
+        "w": 70,
+        "h": 180,
+        "brand": "Miss Vickies"
+      },
+      {
+        "x": 165,
+        "y": 10,
+        "w": 70,
+        "h": 180,
+        "brand": "Miss Vickies"
+      },
+      {
+        "x": 245,
+        "y": 10,
+        "w": 70,
+        "h": 180,
+        "brand": "Miss Vickies"
+      },
+      {
+        "x": 325,
+        "y": 10,
+        "w": 70,
+        "h": 180,
+        "brand": "Miss Vickies"
+      },
+      {
+        "x": 405,
+        "y": 10,
+        "w": 70,
+        "h": 180,
+        "brand": "Miss Vickies"
+      },
+      {
+        "x": 485,
+        "y": 10,
+        "w": 70,
+        "h": 180,
+        "brand": "Miss Vickies"
+      },
+      {
+        "x": 565,
+        "y": 10,
+        "w": 70,
+        "h": 180,
+        "brand": "Miss Vickies"
+      },
+      {
+        "x": 645,
+        "y": 10,
+        "w": 70,
+        "h": 180,
+        "brand": "Kettle"
+      },
+      {
+        "x": 725,
+        "y": 10,
+        "w": 70,
+        "h": 180,
+        "brand": "Kettle"
+      },
+      {
+        "x": 5,
+        "y": 210,
+        "w": 70,
+        "h": 180,
+        "brand": "Cheetos"
+      },
+      {
+        "x": 85,
+        "y": 210,
+        "w": 70,
+        "h": 180,
+        "brand": "Cheetos"
+      },
+      {
+        "x": 165,
+        "y": 210,
+        "w": 70,
+        "h": 180,
+        "brand": "Sun Chips"
+      },
+      {
+        "x": 245,
+        "y": 210,
+        "w": 70,
+        "h": 180,
+        "brand": "Sun Chips"
+      },
+      {
+        "x": 325,
+        "y": 210,
+        "w": 70,
+        "h": 180,
+        "brand": "Sun Chips"
+      },
+      {
+        "x": 405,
+        "y": 210,
+        "w": 70,
+        "h": 180,
+        "brand": "Sun Chips"
+      },
+      {
+        "x": 485,
+        "y": 210,
+        "w": 70,
+        "h": 180,
+        "brand": "Sun Chips"
+      },
+      {
+        "x": 565,
+        "y": 210,
+        "w": 70,
+        "h": 180,
+        "brand": "Sun Chips"
+      },
+      {
+        "x": 645,
+        "y": 210,
+        "w": 70,
+        "h": 180,
+        "brand": "Kettle"
+      },
+      {
+        "x": 725,
+        "y": 210,
+        "w": 70,
+        "h": 180,
+        "brand": "Kettle"
+      },
+      {
+        "x": 5,
+        "y": 410,
+        "w": 70,
+        "h": 180,
+        "brand": "Lays"
+      },
+      {
+        "x": 85,
+        "y": 410,
+        "w": 70,
+        "h": 180,
+        "brand": "Lays"
+      },
+      {
+        "x": 165,
+        "y": 410,
+        "w": 70,
+        "h": 180,
+        "brand": "Lays"
+      },
+      {
+        "x": 245,
+        "y": 410,
+        "w": 70,
+        "h": 180,
+        "brand": "Lays"
+      },
+      {
+        "x": 325,
+        "y": 410,
+        "w": 70,
+        "h": 180,
+        "brand": "Lays"
+      },
+      {
+        "x": 405,
+        "y": 410,
+        "w": 70,
+        "h": 180,
+        "brand": "Lays"
+      },
+      {
+        "x": 485,
+        "y": 410,
+        "w": 70,
+        "h": 180,
+        "brand": "Lays"
+      },
+      {
+        "x": 565,
+        "y": 410,
+        "w": 70,
+        "h": 180,
+        "brand": "Lays"
+      },
+      {
+        "x": 645,
+        "y": 410,
+        "w": 70,
+        "h": 180,
+        "brand": "Kettle"
+      },
+      {
+        "x": 725,
+        "y": 410,
+        "w": 70,
+        "h": 180,
+        "brand": "Kettle"
+      }
+    ],
+    "source": "email",
+    "email_subject": "planobricks: Store B P10/3s/R1",
+    "email_message_id": "19cbefeda155f4d4",
+    "registered_at": 1772731025.012885,
+    "volume_path": "/Volumes/serverless_stable_wunnava_catalog/planobricks_reference/inputs/images/store_images/store-374619f2/1772731015_IMG_0493.jpeg"
+  }
+}

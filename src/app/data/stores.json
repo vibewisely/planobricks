@@ -1,0 +1,16 @@
+{
+  "store-a": {
+    "id": "store-a",
+    "name": "Store A",
+    "description": "Grocery Dataset \u2014 Istanbul tobacco shelf images (Varol & Kuzu, 2014)",
+    "created_at": 1772730970.721727,
+    "image_source": "bundled"
+  },
+  "store-374619f2": {
+    "id": "store-374619f2",
+    "name": "Store B",
+    "description": "Email-uploaded shelf images",
+    "created_at": 1772730977.2595541,
+    "image_source": "custom"
+  }
+}
